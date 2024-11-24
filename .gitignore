@@ -11,3 +11,4 @@ __pycache__
 
 data/input/*
 data/output/*
+data/.DS_Store
