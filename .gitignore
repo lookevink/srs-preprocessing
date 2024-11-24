@@ -8,7 +8,7 @@ __pycache__
 
 
 **/.DS_Store
+.DS_Store
 
 data/input/*
 data/output/*
-data/.DS_Store
