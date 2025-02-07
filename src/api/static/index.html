@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SRS Image Processing</title>
+    <base href="/static/">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+
+        .container {
+            background-color: #f5f5f5;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+
+        .file-list {
+            margin: 10px 0;
+            padding: 10px;
+            background-color: white;
+            border-radius: 4px;
+        }
+
+        .file-item {
+            margin: 5px 0;
+            padding: 5px;
+            background-color: #e9ecef;
+            border-radius: 4px;
+        }
+
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+
+        .status {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+        }
+
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+        }
+
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+
+        .processing {
+            background-color: #fff3cd;
+            color: #856404;
+        }
+
+        select {
+            padding: 8px;
+            margin: 5px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
+
+        .checkbox-container {
+            margin: 10px 0;
+            padding: 10px;
+            background-color: white;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>SRS Image Processing</h1>
+
+    <div class="container">
+        <h2>Convert OIR Files</h2>
+        <input type="file" id="oirFiles" multiple accept=".oir">
+        <div id="oirFileList" class="file-list"></div>
+        <div class="checkbox-container">
+            <input type="checkbox" id="stabilizeAfterConvert">
+            <label for="stabilizeAfterConvert">Stabilize after conversion</label>
+            <select id="convertStabilizeMethod" style="display: none;">
+                <option value="optical_flow">Optical Flow</option>
+                <option value="ransac">RANSAC</option>
+            </select>
+        </div>
+        <button onclick="convertOIR()" id="convertButton">Process Files</button>
+        <div id="oirStatus" class="status"></div>
+    </div>
+
+    <div class="container">
+        <h2>Stabilize TIFF</h2>
+        <input type="file" id="tiffFile" accept=".tiff,.tif">
+        <div id="tiffFileList" class="file-list"></div>
+        <select id="stabilizeMethod">
+            <option value="optical_flow">Optical Flow</option>
+            <option value="ransac">RANSAC</option>
+        </select>
+        <button onclick="stabilize()" id="stabilizeButton">Stabilize Image</button>
+        <div id="tiffStatus" class="status"></div>
+    </div>
+
+    <script>
+        // Toggle stabilization method select when checkbox changes
+        document.getElementById('stabilizeAfterConvert').addEventListener('change', function (e) {
+            document.getElementById('convertStabilizeMethod').style.display =
+                e.target.checked ? 'inline-block' : 'none';
+        });
+
+        // Update file lists when files are selected
+        document.getElementById('oirFiles').addEventListener('change', function (e) {
+            const fileList = document.getElementById('oirFileList');
+            fileList.innerHTML = Array.from(e.target.files)
+                .map(file => `<div class="file-item">${file.name}</div>`)
+                .join('');
+        });
+
+        document.getElementById('tiffFile').addEventListener('change', function (e) {
+            const fileList = document.getElementById('tiffFileList');
+            fileList.innerHTML = e.target.files[0]
+                ? `<div class="file-item">${e.target.files[0].name}</div>`
+                : '';
+        });
+
+        async function convertOIR() {
+            const files = document.getElementById('oirFiles').files;
+            if (files.length === 0) {
+                updateStatus('oirStatus', 'Please select OIR files first', 'error');
+                return;
+            }
+
+            const button = document.getElementById('convertButton');
+            button.disabled = true;
+            updateStatus('oirStatus', 'Converting files...', 'processing');
+
+            const formData = new FormData();
+            Array.from(files).forEach(file => {
+                formData.append('files', file);
+            });
+
+            // Add stabilization parameters if needed
+            const stabilizeAfterConvert = document.getElementById('stabilizeAfterConvert').checked;
+            const method = document.getElementById('convertStabilizeMethod').value;
+
+            try {
+                // Convert OIR files with optional stabilization
+                const convertResponse = await fetch(`/convert-oir?stabilize=${stabilizeAfterConvert}&method=${method}`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!convertResponse.ok) {
+                    throw new Error(`HTTP error! status: ${convertResponse.status}`);
+                }
+
+                const blob = await convertResponse.blob();
+                const filename = stabilizeAfterConvert ? 'stabilized.ome.tiff' : 'converted_files.zip';
+                downloadBlob(blob, filename);
+                updateStatus('oirStatus',
+                    stabilizeAfterConvert ?
+                        'Conversion and stabilization complete! Downloading file...' :
+                        'Conversion complete! Downloading files...',
+                    'success'
+                );
+            } catch (error) {
+                updateStatus('oirStatus', `Error: ${error.message}`, 'error');
+            } finally {
+                button.disabled = false;
+            }
+        }
+
+        async function stabilize() {
+            const file = document.getElementById('tiffFile').files[0];
+            if (!file) {
+                updateStatus('tiffStatus', 'Please select a TIFF file first', 'error');
+                return;
+            }
+
+            const button = document.getElementById('stabilizeButton');
+            button.disabled = true;
+            updateStatus('tiffStatus', 'Stabilizing image...', 'processing');
+
+            const method = document.getElementById('stabilizeMethod').value;
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const response = await fetch(`/stabilize?method=${method}`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const blob = await response.blob();
+                downloadBlob(blob, `stabilized_${file.name}`);
+                updateStatus('tiffStatus', 'Stabilization complete! Downloading file...', 'success');
+            } catch (error) {
+                updateStatus('tiffStatus', `Error: ${error.message}`, 'error');
+            } finally {
+                button.disabled = false;
+            }
+        }
+
+        function downloadBlob(blob, filename) {
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+        }
+
+        function updateStatus(elementId, message, type) {
+            const status = document.getElementById(elementId);
+            status.textContent = message;
+            status.className = `status ${type}`;
+        }
+    </script>
+</body>
+
+</html>

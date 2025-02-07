@@ -2,46 +2,46 @@ import numpy as np
 import tifffile
 import cv2
 import logging
+from pathlib import Path
 
 
 class ImageStabilizer:
-    def __init__(self, input_path, output_path):
+    def __init__(self, method="optical_flow"):
         """
-        Initialize the Image Stabilizer with input and output paths.
+        Initialize the Image Stabilizer.
 
         Args:
-            input_path (str or Path): Path to the input TIFF file.
-            output_path (str or Path): Path where the stabilized TIFF will be saved.
+            method (str): Stabilization method to use (default: "optical_flow")
         """
-        self.input_path = str(input_path)
-        self.output_path = str(output_path)
+        self.method = method
         self.logger = logging.getLogger(__name__)
 
-    def stabilize(self):
+    def stabilize(self, data, axes=None):
         """
-        Perform image stabilization on the input TIFF file and save the result.
+        Perform image stabilization on the input data.
+
+        Args:
+            data (numpy.ndarray): Input image data
+            axes (str, optional): Axes description (e.g., 'TZCYX')
+
+        Returns:
+            numpy.ndarray: Stabilized image data
         """
-        # Read the TIFF file
-        self.logger.info(f"Reading TIFF file from {self.input_path}")
-        with tifffile.TiffFile(self.input_path) as tif:
-            # Assume the first series
-            series = tif.series[0]
-            axes = series.axes  # e.g., 'TZCYX'
-            data = series.asarray()
-            ome_metadata = tif.ome_metadata
+        self.logger.info("Starting stabilization")
+
+        # If axes not provided, assume first dimension is time
+        if axes is None:
+            t_index = 0
+        else:
+            t_index = axes.find('T')
+            if t_index == -1:
+                raise ValueError("No time axis 'T' found in data")
 
         # Convert data to uint8 for OpenCV processing
         data_min = data.min()
         data_max = data.max()
         data_uint8 = ((data - data_min) / (data_max - data_min)
                       * 255).astype(np.uint8)
-
-        # Find the axes indices
-        t_index = axes.find('T')
-
-        # Ensure that time axis exists
-        if t_index == -1:
-            raise ValueError("No time axis 'T' found in data")
 
         num_frames = data.shape[t_index]
         self.logger.info(f"Number of time frames: {num_frames}")
@@ -135,11 +135,46 @@ class ImageStabilizer:
             self._set_frame(stabilized_data, t_index, i,
                             stabilized_frame_original_dtype)
 
-        # Save the stabilized data
-        self.logger.info(f"Saving stabilized data to {self.output_path}")
-        with tifffile.TiffWriter(self.output_path, bigtiff=True, ome=True) as tif:
-            tif.write(stabilized_data, metadata={
-                      'axes': axes}, description=ome_metadata)
+        return stabilized_data
+
+    def stabilize_file(self, input_path, output_path):
+        """
+        Stabilize a TIFF file and save the result.
+
+        Args:
+            input_path (str or Path): Path to input TIFF file
+            output_path (str or Path): Path to save stabilized TIFF
+        """
+        self.logger.info(f"Reading TIFF file from {input_path}")
+        print(f"Starting stabilization of {input_path} to {output_path}")
+
+        try:
+            with tifffile.TiffFile(str(input_path)) as tif:
+                series = tif.series[0]
+                axes = series.axes
+                data = series.asarray()
+                ome_metadata = tif.ome_metadata
+                print(
+                    f"Successfully read input file. Shape: {data.shape}, Axes: {axes}")
+
+            stabilized_data = self.stabilize(data, axes)
+            print(
+                f"Stabilization complete. Output shape: {stabilized_data.shape}")
+
+            self.logger.info(f"Saving stabilized data to {output_path}")
+            print(f"Attempting to save to {output_path}")
+
+            with tifffile.TiffWriter(str(output_path), bigtiff=True, ome=True) as tif:
+                tif.write(stabilized_data, metadata={
+                          'axes': axes}, description=ome_metadata)
+
+            print(f"Save complete. File exists: {Path(output_path).exists()}")
+            print(f"File size: {Path(output_path).stat().st_size}")
+
+        except Exception as e:
+            print(f"Error during stabilization: {str(e)}")
+            raise
+
         self.logger.info("Stabilization complete")
 
     def _get_frame(self, data, t_index, frame_number):

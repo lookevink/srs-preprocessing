@@ -99,10 +99,7 @@ class OIRConverter:
                 # Read and write each plane
                 plane_count = reader.getImageCount()
                 for index in range(plane_count):
-                    logger.debug(f"Reading plane index {index}")
                     img = reader.openBytes(index)
-
-                    logger.debug(f"Writing plane index {index}")
                     writer.saveBytes(index, img)
 
                 writer.close()
@@ -114,3 +111,11 @@ class OIRConverter:
             logger.error(f"Error during conversion: {str(e)}")
             logger.exception("Full traceback:")
             raise
+
+    def cleanup(self):
+        """Clean up Java VM on object destruction"""
+        try:
+            javabridge.kill_vm()
+            logger.info("Java VM shut down successfully")
+        except Exception as e:
+            logger.error(f"Error shutting down Java VM: {str(e)}")
