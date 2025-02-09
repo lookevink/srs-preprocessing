@@ -7,10 +7,18 @@ import uuid
 import asyncio
 import tifffile
 import numpy as np
+import javabridge
+import bioformats
+import logging
+from concurrent.futures import ThreadPoolExecutor
 
 from src.conversion.oir_to_tiff import OIRConverter
 from src.stabilize.stabilizer_optical_flow import ImageStabilizer
 from src.stabilize.stabilizer_ransac_offset import RANSACStabilizer
+
+# Setup logging at the top of the file
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="SRS Image Processing API")
 
@@ -23,6 +31,9 @@ TEMP_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 # Add static files mounting AFTER FastAPI initialization but BEFORE routes
 static_dir = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=static_dir, html=True), name="static")
+
+# Create a thread pool executor for blocking operations
+thread_pool = ThreadPoolExecutor(max_workers=4)
 
 
 @app.post("/convert-oir")
@@ -42,46 +53,52 @@ async def convert_oir_files(
     session_input.mkdir(parents=True)
     session_output.mkdir(parents=True)
 
-    converter = None
     try:
-        # Save uploaded files
+        # Save uploaded files first
         input_paths = []
         for file in files:
             if not file.filename.lower().endswith('.oir'):
                 raise HTTPException(
-                    status_code=400, detail="Invalid file format. Only .oir files are accepted")
+                    status_code=400, detail="Invalid file format")
 
             file_path = session_input / file.filename
-            with file_path.open("wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
+            # Read in chunks to prevent memory issues
+            with file_path.open('wb') as buffer:
+                while content := await file.read(8192):  # 8KB chunks
+                    buffer.write(content)
             input_paths.append(file_path)
 
-        # Convert files
+        # Process files in thread pool
         converter = OIRConverter()
-        converter.convert(input_paths, session_output)
+
+        # Run conversion in thread pool
+        await asyncio.get_event_loop().run_in_executor(
+            thread_pool,
+            lambda: converter.convert(input_paths, session_output)
+        )
 
         if stabilize:
-            # Process all files before cleaning up Java VM
+            # Process stabilization if requested
             tiff_files = list(session_output.glob("*.ome.tiff"))
-
-            # Merge converted files into single TIFF
             merged_path = session_output / "merged.ome.tiff"
 
-            # Read images and collect data
-            images = []
-            axes_list = []
-            for tiff_path in sorted(tiff_files):
-                with tifffile.TiffFile(str(tiff_path)) as tif:
-                    series = tif.series[0]
-                    img = series.asarray()
-                    axes = series.axes
-                    images.append(img)
-                    axes_list.append(axes)
+            # Read and merge images in thread pool
+            def process_images():
+                images = []
+                axes_list = []
+                for tiff_path in sorted(tiff_files):
+                    with tifffile.TiffFile(str(tiff_path)) as tif:
+                        series = tif.series[0]
+                        img = series.asarray()
+                        axes = series.axes
+                        images.append(img)
+                        axes_list.append(axes)
+                return images, axes_list
 
-            # Now we can cleanup the Java VM as we have all the data we need
-            if converter:
-                converter.cleanup()
-                converter = None
+            images, axes_list = await asyncio.get_event_loop().run_in_executor(
+                thread_pool,
+                process_images
+            )
 
             # Validate axes consistency
             base_axes = axes_list[0]
@@ -156,51 +173,47 @@ async def convert_oir_files(
                 f"stabilized_{session_id}.ome.tiff"
             shutil.copy2(stabilized_path, final_output)
 
-            # Clean up temporary directories
-            if session_input.exists():
-                shutil.rmtree(session_input)
-            if session_output.exists():
-                shutil.rmtree(session_output)
-
             return FileResponse(
                 path=final_output,
                 filename="stabilized.ome.tiff",
                 media_type="image/tiff",
-                background=asyncio.create_task(
-                    cleanup_file(final_output)
+                background=asyncio.create_task(cleanup_file(final_output))
+            )
+        else:
+            # Create zip of results
+            output_zip = TEMP_OUTPUT_DIR / f"{session_id}.zip"
+            await asyncio.to_thread(
+                lambda: shutil.make_archive(
+                    str(output_zip.with_suffix('')),
+                    'zip',
+                    session_output
                 )
             )
-
-        else:
-            # Cleanup Java VM before creating zip
-            if converter:
-                converter.cleanup()
-                converter = None
-
-            # Create zip of results if not stabilizing
-            output_zip = TEMP_OUTPUT_DIR / f"{session_id}.zip"
-            shutil.make_archive(str(output_zip.with_suffix('')),
-                                'zip', session_output)
 
             return FileResponse(
                 path=output_zip,
                 filename="converted_files.zip",
-                media_type="application/zip"
+                media_type="application/zip",
+                background=asyncio.create_task(cleanup_file(output_zip))
             )
 
     except Exception as e:
-        if converter:
-            converter.cleanup()
-        # Clean up temporary directories
-        if session_input.exists():
-            shutil.rmtree(session_input)
-        if session_output.exists():
-            shutil.rmtree(session_output)
-        raise e
-
+        logger.error(f"Error in convert_oir_files: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
-        # Remove cleanup from finally block
-        pass
+        asyncio.create_task(cleanup_directories(session_input, session_output))
+
+
+async def cleanup_directories(input_dir: Path, output_dir: Path):
+    """Clean up temporary directories asynchronously"""
+    await asyncio.sleep(1)  # Give time for file operations to complete
+    try:
+        if input_dir.exists():
+            await asyncio.to_thread(lambda: shutil.rmtree(input_dir))
+        if output_dir.exists():
+            await asyncio.to_thread(lambda: shutil.rmtree(output_dir))
+    except Exception as e:
+        logger.error(f"Error cleaning up directories: {e}")
 
 
 @app.post("/stabilize")
@@ -263,6 +276,19 @@ async def startup_event():
 
     TEMP_INPUT_DIR.mkdir(parents=True)
     TEMP_OUTPUT_DIR.mkdir(parents=True)
+
+    # Don't initialize VM here - let OIRConverter handle it
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    # Only kill VM if it's actually running
+    if OIRConverter._vm_initialized:
+        try:
+            javabridge.kill_vm()
+            OIRConverter._vm_initialized = False
+        except Exception as e:
+            logger.error(f"Error shutting down Java VM: {str(e)}")
 
 
 # Add this helper function at the module level
