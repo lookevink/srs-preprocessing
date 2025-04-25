@@ -177,7 +177,7 @@ async def convert_oir_files(
                 path=final_output,
                 filename="stabilized.ome.tiff",
                 media_type="image/tiff",
-                background=asyncio.create_task(cleanup_file(final_output))
+                background=cleanup_file(final_output)
             )
         else:
             # Create zip of results
@@ -194,7 +194,7 @@ async def convert_oir_files(
                 path=output_zip,
                 filename="converted_files.zip",
                 media_type="application/zip",
-                background=asyncio.create_task(cleanup_file(output_zip))
+                background=cleanup_file(output_zip)
             )
 
     except Exception as e:
@@ -292,11 +292,13 @@ async def shutdown_event():
 
 
 # Add this helper function at the module level
-async def cleanup_file(file_path: Path):
+def cleanup_file(file_path: Path):
     """Clean up a file after it has been sent"""
-    try:
-        await asyncio.sleep(1)  # Give time for the file to be sent
-        if file_path.exists():
-            file_path.unlink()
-    except Exception as e:
-        print(f"Error cleaning up file {file_path}: {e}")
+    async def _cleanup():
+        try:
+            await asyncio.sleep(1)  # Give time for the file to be sent
+            if file_path.exists():
+                file_path.unlink()
+        except Exception as e:
+            print(f"Error cleaning up file {file_path}: {e}")
+    return _cleanup
